@@ -1,6 +1,7 @@
 package com.Tvmods.BaboonPatcher
 
 import android.os.Binder
+import android.os.IBinder
 import android.os.Parcel
 import java.io.File
 import java.io.FileInputStream
@@ -19,6 +20,12 @@ class PatchUserService : Binder() {
 
         private const val DESTINATION_PACKAGE =
             "com.Tvmods.Baboon"
+
+        private const val SOURCE_PATH =
+            "/storage/emulated/0/Android/obb/com.BabTeam.Baboon"
+
+        private const val DESTINATION_PATH =
+            "/storage/emulated/0/Android/obb/com.Tvmods.Baboon"
     }
 
     override fun onTransact(
@@ -28,7 +35,7 @@ class PatchUserService : Binder() {
         flags: Int
     ): Boolean {
 
-        if (code == INTERFACE_TRANSACTION) {
+        if (code == IBinder.INTERFACE_TRANSACTION) {
             reply?.writeString(DESCRIPTOR)
             return true
         }
@@ -39,66 +46,74 @@ class PatchUserService : Binder() {
 
         data.enforceInterface(DESCRIPTOR)
 
-        val sourcePath = data.readString()
-        val destinationPath = data.readString()
+        val requestedSource = data.readString()
+        val requestedDestination = data.readString()
 
         try {
-            require(
-                sourcePath ==
-                    "/storage/emulated/0/Android/obb/$SOURCE_PACKAGE"
-            ) {
+            require(requestedSource == SOURCE_PATH) {
                 "Unexpected source directory."
             }
 
-            require(
-                destinationPath ==
-                    "/storage/emulated/0/Android/obb/$DESTINATION_PACKAGE"
-            ) {
+            require(requestedDestination == DESTINATION_PATH) {
                 "Unexpected destination directory."
             }
 
-            val source = File(sourcePath)
-            val destination = File(destinationPath)
+            val source = File(SOURCE_PATH)
+            val destination = File(DESTINATION_PATH)
 
             if (!source.isDirectory) {
                 throw IllegalStateException(
-                    "Source OBB directory does not exist: $sourcePath"
+                    "Source OBB directory was not found: $SOURCE_PATH"
                 )
             }
 
             val files = source.listFiles()
                 ?: throw IllegalStateException(
-                    "Cannot read the source OBB directory."
+                    "Cannot list the source OBB directory. Check shell access."
                 )
 
             val obbFiles = files.filter { it.isFile }
 
             if (obbFiles.isEmpty()) {
                 throw IllegalStateException(
-                    "No OBB files were found in the source directory."
+                    "No files were found in the source OBB directory."
                 )
             }
 
             if (!destination.exists() && !destination.mkdirs()) {
                 throw IllegalStateException(
-                    "Could not create the destination directory."
+                    "Cannot create the destination OBB directory: $DESTINATION_PATH"
+                )
+            }
+
+            if (!destination.isDirectory || !destination.canWrite()) {
+                throw IllegalStateException(
+                    "The destination OBB directory is not writable."
                 )
             }
 
             var copied = 0
+            var totalBytes = 0L
 
             for (file in obbFiles) {
-                val newName = file.name.replace(
+                val renamed = file.name.replace(
                     SOURCE_PACKAGE,
                     DESTINATION_PACKAGE
                 )
 
-                val target = File(destination, newName)
+                val target = File(destination, renamed)
+
+                if (target.canonicalFile.parentFile != destination.canonicalFile) {
+                    throw IllegalStateException(
+                        "Invalid destination filename."
+                    )
+                }
 
                 FileInputStream(file).use { input ->
                     FileOutputStream(target).use { output ->
-                        input.copyTo(output)
+                        val bytesCopied = input.copyTo(output)
                         output.fd.sync()
+                        totalBytes += bytesCopied
                     }
                 }
 
@@ -107,13 +122,13 @@ class PatchUserService : Binder() {
 
             reply?.writeNoException()
             reply?.writeString(
-                "SUCCESS:Copied $copied OBB file(s) to $destinationPath"
+                "SUCCESS:Copied $copied OBB file(s) ($totalBytes bytes) to $DESTINATION_PATH"
             )
 
         } catch (e: Exception) {
             reply?.writeNoException()
             reply?.writeString(
-                "ERROR:${e.message ?: "Unknown file-copy error"}"
+                "ERROR:${e.message ?: "Unknown OBB copy error"}"
             )
         }
 
