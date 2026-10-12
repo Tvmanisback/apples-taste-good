@@ -15,19 +15,18 @@ class MainActivity : Activity() {
 
     private lateinit var webView: WebView
     private val executor = Executors.newSingleThreadExecutor()
+    private val requestCode = 4207
 
     private val permissionListener =
-        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-            if (requestCode == REQUEST_CODE) {
-                val granted =
-                    grantResult == PackageManager.PERMISSION_GRANTED
-
-                runOnUiThread {
-                    webView.evaluateJavascript(
-                        "onAccessResult($granted)",
-                        null
-                    )
-                }
+        Shizuku.OnRequestPermissionResultListener { code, result ->
+            if (code == requestCode) {
+                sendStatus(
+                    if (result == PackageManager.PERMISSION_GRANTED)
+                        "Shizuku access granted."
+                    else
+                        "Shizuku permission denied.",
+                    result == PackageManager.PERMISSION_GRANTED
+                )
             }
         }
 
@@ -38,6 +37,7 @@ class MainActivity : Activity() {
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
             webViewClient = WebViewClient()
             addJavascriptInterface(PatcherBridge(), "Patcher")
             loadUrl("file:///android_asset/index.html")
@@ -49,25 +49,47 @@ class MainActivity : Activity() {
     inner class PatcherBridge {
 
         @JavascriptInterface
-        fun grantAccess() {
+        fun checkAccess() {
             executor.execute {
                 try {
+                    val connected = Shizuku.pingBinder()
+                    val granted = connected &&
+                        Shizuku.checkSelfPermission() ==
+                        PackageManager.PERMISSION_GRANTED
+
+                    sendStatus(
+                        when {
+                            !connected -> "Shizuku is not running."
+                            granted -> "Shizuku is connected and authorized."
+                            else -> "Grant Shizuku access to continue."
+                        },
+                        granted
+                    )
+                } catch (e: Exception) {
+                    sendStatus("Access check failed: ${e.message}", false)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun grantAccess() {
+            runOnUiThread {
+                try {
                     if (!Shizuku.pingBinder()) {
-                        sendStatus("Shizuku is not running.")
-                        return@execute
+                        sendStatus("Start Shizuku first.", false)
+                        return@runOnUiThread
                     }
 
-                    if (Shizuku.checkSelfPermission() ==
+                    if (
+                        Shizuku.checkSelfPermission() ==
                         PackageManager.PERMISSION_GRANTED
                     ) {
-                        sendAccessResult(true)
+                        sendStatus("Access already granted.", true)
                     } else {
-                        Shizuku.requestPermission(REQUEST_CODE)
+                        Shizuku.requestPermission(requestCode)
                     }
                 } catch (e: Exception) {
-                    sendStatus(
-                        "Permission error: ${e.message ?: "Unknown error"}"
-                    )
+                    sendStatus("Permission request failed: ${e.message}", false)
                 }
             }
         }
@@ -75,22 +97,21 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun startPatch() {
             executor.execute {
-                var process: Process? = null
-
                 try {
                     if (!Shizuku.pingBinder()) {
-                        sendStatus("ERROR: Shizuku is not running.")
+                        sendStatus("Shizuku is not running.", false)
                         return@execute
                     }
 
-                    if (Shizuku.checkSelfPermission() !=
+                    if (
+                        Shizuku.checkSelfPermission() !=
                         PackageManager.PERMISSION_GRANTED
                     ) {
-                        sendStatus("ERROR: Grant Shizuku permission first.")
+                        sendStatus("Grant Shizuku permission first.", false)
                         return@execute
                     }
 
-                    sendStatus("Checking OBB directories...")
+                    sendStatus("Checking OBB directories...", true)
 
                     val script = """
                         set -eu
@@ -99,93 +120,119 @@ class MainActivity : Activity() {
                         DST='/storage/emulated/0/Android/obb/com.Tvmods.Baboon'
 
                         if [ ! -d "${'$'}SRC" ]; then
-                            echo 'ERROR: Source OBB directory not found.'
-                            exit 2
+                            echo "ERROR: Source OBB directory not found: ${'$'}SRC"
+                            exit 21
                         fi
 
                         mkdir -p "${'$'}DST"
 
-                        FOUND=0
+                        count=0
 
-                        for FILE in "${'$'}SRC"/*; do
-                            [ -f "${'$'}FILE" ] || continue
-                            FOUND=1
+                        for file in "${'$'}SRC"/*; do
+                            [ -f "${'$'}file" ] || continue
 
-                            NAME="${'$'}{FILE##*/}"
-                            NEWNAME=$(printf '%s' "${'$'}NAME" |
-                                sed 's/com\.BabTeam\.Baboon/com.Tvmods.Baboon/g')
+                            name="${'$'}{file##*/}"
 
-                            cp -f "${'$'}FILE" "${'$'}DST/${'$'}NEWNAME"
+                            newname="${'$'}(
+                                printf '%s' "${'$'}name" |
+                                sed 's/com\.BabTeam\.Baboon/com.Tvmods.Baboon/g'
+                            )"
+
+                            cp -f "${'$'}file" "${'$'}DST/${'$'}newname"
+
+                            echo "Copied: ${'$'}name -> ${'$'}newname"
+
+                            count="${'$'}((count + 1))"
                         done
 
-                        if [ "${'$'}FOUND" -eq 0 ]; then
-                            echo 'ERROR: No OBB files found.'
-                            exit 3
+                        if [ "${'$'}count" -eq 0 ]; then
+                            echo "ERROR: No OBB files found."
+                            exit 22
                         fi
 
-                        echo 'COPY_COMPLETE'
+                        echo "COPY_COMPLETE:${'$'}count"
                     """.trimIndent()
 
-                    process = Shizuku.newProcess(
+                    // Execute Android shell commands using Shizuku's
+                    // authorized shell process API.
+                    val process = Shizuku.newProcess(
                         arrayOf("sh", "-c", script),
                         null,
                         null
                     )
 
-                    val stdout = BufferedReader(
-                        InputStreamReader(process.inputStream)
-                    ).use { reader ->
-                        reader.readText()
+                    val stdout = StringBuilder()
+                    val stderr = StringBuilder()
+
+                    val outThread = Thread {
+                        BufferedReader(
+                            InputStreamReader(process.inputStream)
+                        ).useLines { lines ->
+                            lines.forEach {
+                                stdout.append(it).append('\n')
+                            }
+                        }
                     }
 
-                    val stderr = BufferedReader(
-                        InputStreamReader(process.errorStream)
-                    ).use { reader ->
-                        reader.readText()
+                    val errThread = Thread {
+                        BufferedReader(
+                            InputStreamReader(process.errorStream)
+                        ).useLines { lines ->
+                            lines.forEach {
+                                stderr.append(it).append('\n')
+                            }
+                        }
                     }
+
+                    outThread.start()
+                    errThread.start()
 
                     val exitCode = process.waitFor()
 
-                    if (exitCode == 0 && stdout.contains("COPY_COMPLETE")) {
-                        sendStatus("OBB copy completed successfully.")
+                    outThread.join()
+                    errThread.join()
+
+                    val output = (
+                        stdout.toString() + stderr.toString()
+                    ).trim()
+
+                    if (
+                        exitCode == 0 &&
+                        stdout.contains("COPY_COMPLETE:")
+                    ) {
+                        sendStatus(
+                            "Copy completed successfully.\n\n$output",
+                            true
+                        )
                     } else {
                         sendStatus(
-                            "ERROR: Command failed (exit $exitCode).\n" +
-                                stdout + "\n" + stderr
+                            "Copy failed (exit code $exitCode).\n\n$output",
+                            false
                         )
                     }
-                } catch (e: Exception) {
-                    process?.destroy()
 
+                } catch (e: Exception) {
                     sendStatus(
-                        "ERROR: ${e.message ?: "Command execution failed"}"
+                        "Operation failed: ${e.javaClass.simpleName}: ${e.message}",
+                        false
                     )
                 }
             }
         }
     }
 
-    private fun sendAccessResult(granted: Boolean) {
-        runOnUiThread {
-            webView.evaluateJavascript(
-                "onAccessResult($granted)",
-                null
-            )
-        }
-    }
+    private fun sendStatus(message: String, success: Boolean) {
+        if (!::webView.isInitialized) return
 
-    private fun sendStatus(message: String) {
-        val escaped = message
-            .replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace("\n", "\\n")
-            .replace("\r", "")
+        val safeMessage = org.json.JSONObject.quote(message)
 
         runOnUiThread {
-            webView.evaluateJavascript(
-                "onPatchStatus('$escaped')",
-                null
-            )
+            if (::webView.isInitialized) {
+                webView.evaluateJavascript(
+                    "window.onPatcherStatus?.($safeMessage, $success);",
+                    null
+                )
+            }
         }
     }
 
@@ -194,14 +241,9 @@ class MainActivity : Activity() {
         executor.shutdownNow()
 
         if (::webView.isInitialized) {
-            webView.removeJavascriptInterface("Patcher")
             webView.destroy()
         }
 
         super.onDestroy()
-    }
-
-    companion object {
-        private const val REQUEST_CODE = 1001
     }
 }
