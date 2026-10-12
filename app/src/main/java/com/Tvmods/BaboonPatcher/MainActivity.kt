@@ -1,34 +1,118 @@
 package com.Tvmods.BaboonPatcher
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.IBinder
+import android.os.Parcel
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
 
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executor: ExecutorService =
+        Executors.newSingleThreadExecutor()
+
     private val permissionRequestCode = 1001
+    private val transactionCopyObb = 1
 
     @Volatile
-    private var checkingAccess = false
+    private var permissionRequestPending = false
+
+    @Volatile
+    private var serviceBinding = false
+
+    @Volatile
+    private var patchService: IBinder? = null
+
+    private var serviceBound = false
+
+    private val serviceArgs by lazy {
+        Shizuku.UserServiceArgs(
+            ComponentName(
+                packageName,
+                PatchUserService::class.java.name
+            )
+        )
+            .daemon(false)
+            .processNameSuffix("baboonpatcher")
+            .tag("BaboonPatcher")
+            .version(1)
+    }
 
     private val permissionListener =
-        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-            if (requestCode == permissionRequestCode) {
-                if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                    sendStatus(true, "Patch access granted.")
-                } else {
-                    sendStatus(false, "Permission denied. Authorize BaboonPatcher in Bytezuku.")
+        Shizuku.OnRequestPermissionResultListener {
+                requestCode,
+                grantResult ->
+
+            if (requestCode != permissionRequestCode) {
+                return@OnRequestPermissionResultListener
+            }
+
+            permissionRequestPending = false
+
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                sendStatus(
+                    true,
+                    "Authorization confirmed. Patch access is ready."
+                )
+            } else {
+                sendStatus(
+                    false,
+                    "Permission denied. Authorize BaboonPatcher in Bytezuku."
+                )
+            }
+        }
+
+    private val serviceConnection =
+        object : ServiceConnection {
+
+            override fun onServiceConnected(
+                name: ComponentName?,
+                service: IBinder?
+            ) {
+                serviceBinding = false
+
+                if (service == null) {
+                    patchService = null
+
+                    sendStatus(
+                        false,
+                        "The patch service returned no connection."
+                    )
+                    return
                 }
+
+                patchService = service
+
+                sendStatus(
+                    true,
+                    "Patch service connected. Ready to copy OBB files."
+                )
+
+                // The service stays available until the app disconnects.
+                // Bytezuku itself is not stopped by this callback.
+            }
+
+            override fun onServiceDisconnected(
+                name: ComponentName?
+            ) {
+                patchService = null
+                serviceBinding = false
+
+                sendStatus(
+                    false,
+                    "Patch service disconnected. Check Bytezuku and retry."
+                )
             }
         }
 
@@ -40,32 +124,55 @@ class MainActivity : Activity() {
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+
             webViewClient = WebViewClient()
-            addJavascriptInterface(PatcherBridge(), "Patcher")
+
+            addJavascriptInterface(
+                PatcherBridge(),
+                "Patcher"
+            )
         }
 
         setContentView(webView)
+
         webView.loadUrl("file:///android_asset/index.html")
     }
 
-    private fun sendStatus(success: Boolean, message: String) {
+    private fun sendStatus(
+        available: Boolean,
+        message: String
+    ) {
         if (!::webView.isInitialized) return
 
         val safeMessage = JSONObject.quote(message)
 
         runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+
             webView.evaluateJavascript(
-                "if (typeof window.onPatcherStatus === 'function') {" +
-                    "window.onPatcherStatus($success, $safeMessage);" +
-                    "}",
+                """
+                if (typeof window.onPatcherStatus === 'function') {
+                    window.onPatcherStatus($available, $safeMessage);
+                } else if (typeof window.onAccessResult === 'function') {
+                    window.onAccessResult($available, $safeMessage);
+                }
+                """.trimIndent(),
                 null
             )
         }
     }
 
-    private fun hasShizukuPermission(): Boolean {
+    private fun isShizukuConnected(): Boolean {
         return try {
-            Shizuku.pingBinder() &&
+            Shizuku.pingBinder()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasPatchAccess(): Boolean {
+        return try {
+            isShizukuConnected() &&
                 Shizuku.checkSelfPermission() ==
                 PackageManager.PERMISSION_GRANTED
         } catch (_: Exception) {
@@ -77,79 +184,76 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun checkAccess() {
-            if (checkingAccess) return
-            checkingAccess = true
-
             executor.execute {
-                try {
-                    if (!Shizuku.pingBinder()) {
+                when {
+                    !isShizukuConnected() -> {
                         sendStatus(
                             false,
-                            "Bytezuku is not connected. Start Bytezuku and try again."
+                            "Bytezuku is not connected. Start its service first."
                         )
-                    } else if (hasShizukuPermission()) {
+                    }
+
+                    hasPatchAccess() -> {
                         sendStatus(
                             true,
-                            "Existing Shizuku authorization detected. Ready to patch."
+                            "Existing authorization detected. Patch access is ready."
                         )
-                    } else {
+                    }
+
+                    else -> {
                         sendStatus(
                             false,
                             "Bytezuku is connected, but BaboonPatcher has not been authorized."
                         )
                     }
-                } catch (e: Exception) {
-                    sendStatus(
-                        false,
-                        "Shizuku check failed: ${e.message ?: "Unknown error"}"
-                    )
-                } finally {
-                    checkingAccess = false
                 }
             }
         }
 
         @JavascriptInterface
         fun grantAccess() {
-            if (checkingAccess) return
-            checkingAccess = true
-
-            executor.execute {
+            runOnUiThread {
                 try {
-                    if (!Shizuku.pingBinder()) {
+                    if (!isShizukuConnected()) {
                         sendStatus(
                             false,
-                            "Bytezuku is not connected. Open Bytezuku and start its service."
+                            "Bytezuku is not connected. Start its service first."
                         )
-                        return@execute
+                        return@runOnUiThread
                     }
 
-                    if (hasShizukuPermission()) {
+                    if (hasPatchAccess()) {
                         sendStatus(
                             true,
-                            "Patch access is already authorized."
+                            "Existing authorization detected. Patch access is ready."
                         )
-                        return@execute
+                        return@runOnUiThread
                     }
 
-                    runOnUiThread {
-                        try {
-                            Shizuku.requestPermission(permissionRequestCode)
-                        } catch (e: Exception) {
-                            sendStatus(
-                                false,
-                                "Permission request failed: ${e.message ?: "Unknown error"}"
-                            )
-                        } finally {
-                            checkingAccess = false
-                        }
+                    if (permissionRequestPending) {
+                        sendStatus(
+                            false,
+                            "Waiting for the authorization result."
+                        )
+                        return@runOnUiThread
                     }
-                } catch (e: Exception) {
+
+                    permissionRequestPending = true
+
                     sendStatus(
                         false,
-                        "Authorization check failed: ${e.message ?: "Unknown error"}"
+                        "Requesting authorization. Approve BaboonPatcher if prompted."
                     )
-                    checkingAccess = false
+
+                    Shizuku.requestPermission(permissionRequestCode)
+
+                } catch (e: Exception) {
+                    permissionRequestPending = false
+
+                    sendStatus(
+                        false,
+                        "Authorization failed: ${e.message ?: "Unknown error"}"
+                    )
                 }
             }
         }
@@ -157,24 +261,167 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun startPatch() {
             executor.execute {
-                if (!hasShizukuPermission()) {
+                try {
+                    if (!isShizukuConnected()) {
+                        sendStatus(
+                            false,
+                            "Bytezuku is not connected."
+                        )
+                        return@execute
+                    }
+
+                    if (!hasPatchAccess()) {
+                        sendStatus(
+                            false,
+                            "Grant Patch Access before copying files."
+                        )
+                        return@execute
+                    }
+
+                    val existingService = patchService
+
+                    if (existingService != null && existingService.isBinderAlive) {
+                        copyObbFiles(existingService)
+                        return@execute
+                    }
+
+                    if (serviceBinding) {
+                        sendStatus(
+                            false,
+                            "The patch service is still connecting. Try again shortly."
+                        )
+                        return@execute
+                    }
+
                     sendStatus(
                         false,
-                        "Grant Patch Access before copying OBB files."
+                        "Connecting to the authorized patch service..."
                     )
-                    return@execute
-                }
 
-                sendStatus(
-                    false,
-                    "Authorization is available, but the patch service must be connected before copying files."
+                    runOnUiThread {
+                        try {
+                            if (!hasPatchAccess()) {
+                                sendStatus(
+                                    false,
+                                    "Shizuku authorization is no longer available."
+                                )
+                                return@runOnUiThread
+                            }
+
+                            serviceBinding = true
+
+                            Shizuku.bindUserService(
+                                serviceArgs,
+                                serviceConnection
+                            )
+
+                            serviceBound = true
+
+                        } catch (e: Exception) {
+                            serviceBinding = false
+
+                            sendStatus(
+                                false,
+                                "Could not connect to the patch service: ${e.message ?: "Unknown error"}"
+                            )
+                        }
+                    }
+
+                } catch (e: Exception) {
+                    sendStatus(
+                        false,
+                        "Patch failed: ${e.message ?: "Unknown error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun copyObbFiles(service: IBinder) {
+        var data: Parcel? = null
+        var reply: Parcel? = null
+
+        try {
+            sendStatus(
+                false,
+                "Copying OBB files..."
+            )
+
+            data = Parcel.obtain()
+            reply = Parcel.obtain()
+
+            data.writeInterfaceToken(
+                "com.Tvmods.BaboonPatcher.PatchUserService"
+            )
+
+            data.writeString(
+                "/storage/emulated/0/Android/obb/com.BabTeam.Baboon"
+            )
+
+            data.writeString(
+                "/storage/emulated/0/Android/obb/com.Tvmods.Baboon"
+            )
+
+            val handled = service.transact(
+                transactionCopyObb,
+                data,
+                reply,
+                0
+            )
+
+            if (!handled) {
+                throw IllegalStateException(
+                    "The patch service did not handle the copy request."
                 )
             }
+
+            reply.readException()
+
+            val result = reply.readString()
+                ?: throw IllegalStateException(
+                    "The patch service returned an empty response."
+                )
+
+            val success = result.startsWith("SUCCESS:")
+
+            val message = when {
+                success -> result.removePrefix("SUCCESS:")
+                result.startsWith("ERROR:") ->
+                    result.removePrefix("ERROR:")
+                else -> result
+            }
+
+            sendStatus(success, message)
+
+        } catch (e: Exception) {
+            sendStatus(
+                false,
+                "OBB copy failed: ${e.message ?: "Unknown error"}"
+            )
+        } finally {
+            data?.recycle()
+            reply?.recycle()
         }
     }
 
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(permissionListener)
+
+        if (serviceBound) {
+            try {
+                // Remove this app's connection without explicitly requesting
+                // that the shared UserService be killed.
+                Shizuku.unbindUserService(
+                    serviceArgs,
+                    serviceConnection,
+                    false
+                )
+            } catch (_: Exception) {
+                // The service may already have disconnected.
+            }
+        }
+
+        patchService = null
 
         if (::webView.isInitialized) {
             webView.removeJavascriptInterface("Patcher")
@@ -182,6 +429,7 @@ class MainActivity : Activity() {
         }
 
         executor.shutdownNow()
+
         super.onDestroy()
     }
 }
