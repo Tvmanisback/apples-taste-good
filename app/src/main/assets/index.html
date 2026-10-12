@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BaboonPatcher</title>
+<style>
+* {
+    box-sizing: border-box;
+}
+body {
+    margin: 0;
+    padding: 24px;
+    min-height: 100vh;
+    background: #100707;
+    color: #fff;
+    font-family: Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.card {
+    width: 100%;
+    max-width: 430px;
+    padding: 28px;
+    background: #1d1111;
+    border: 1px solid #572222;
+    border-radius: 18px;
+    text-align: center;
+}
+h1 {
+    margin-top: 0;
+    color: #ff3838;
+}
+p {
+    color: #cdbbbb;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+button {
+    width: 100%;
+    margin-top: 14px;
+    padding: 15px;
+    border: 0;
+    border-radius: 10px;
+    background: #a90000;
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+}
+button:disabled {
+    opacity: 0.4;
+}
+#status {
+    margin-top: 20px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 14px;
+}
+</style>
+</head>
+<body>
+<main class="card">
+    <h1>BaboonPatcher</h1>
+<p>
+    Copies OBB files from the original directory to the
+    destination directory, renaming package-specific filenames.
+</p>
+<button onclick="grantAccess()">Grant Patch Access</button>
+<button id="patchButton" onclick="startPatch()" disabled>
+    Patch
+</button>
+<p id="status">Grant Shizuku permission to continue.</p>
+</main>
+<script>
+const patchButton = document.getElementById("patchButton");
+const statusElement = document.getElementById("status");
+function grantAccess() {
+    statusElement.textContent = "Checking Shizuku...";
+    Patcher.grantAccess();
+}
+function onAccessResult(granted, message) {
+    patchButton.disabled = !granted;
+    statusElement.textContent =
+        message || (granted
+            ? "Access granted. You can continue."
+            : "Access denied. Start Shizuku and grant permission.");
+}
+function startPatch() {
+    patchButton.disabled = true;
+    statusElement.textContent = "Copying OBB files...";
+    Patcher.startPatch();
+}
+function onPatchStatus(message) {
+    statusElement.textContent = message;
+    patchButton.disabled = false;
+}
+</script>
+</body>
+</html>
