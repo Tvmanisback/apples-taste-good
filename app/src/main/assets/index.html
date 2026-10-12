@@ -4,10 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BaboonPatcher</title>
+
 <style>
 * {
     box-sizing: border-box;
 }
+
 body {
     margin: 0;
     padding: 24px;
@@ -19,6 +21,7 @@ body {
     align-items: center;
     justify-content: center;
 }
+
 .card {
     width: 100%;
     max-width: 430px;
@@ -28,15 +31,18 @@ body {
     border-radius: 18px;
     text-align: center;
 }
+
 h1 {
     margin-top: 0;
     color: #ff3838;
 }
+
 p {
     color: #cdbbbb;
     line-height: 1.5;
     overflow-wrap: anywhere;
 }
+
 button {
     width: 100%;
     margin-top: 14px;
@@ -47,54 +53,180 @@ button {
     color: white;
     font-size: 16px;
     font-weight: bold;
+    cursor: pointer;
 }
+
 button:disabled {
     opacity: 0.4;
+    cursor: not-allowed;
 }
+
 #status {
     margin-top: 20px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font-size: 14px;
 }
+
+#status.error {
+    color: #ff7777;
+}
+
+#status.success {
+    color: #79e69a;
+}
 </style>
 </head>
+
 <body>
 <main class="card">
     <h1>BaboonPatcher</h1>
-<p>
-    Copies OBB files from the original directory to the
-    destination directory, renaming package-specific filenames.
-</p>
-<button onclick="grantAccess()">Grant Patch Access</button>
-<button id="patchButton" onclick="startPatch()" disabled>
-    Patch
-</button>
-<p id="status">Grant Shizuku permission to continue.</p>
+
+    <p>
+        Copies OBB files from the original directory to the
+        destination directory, renaming package-specific filenames.
+    </p>
+
+    <button id="accessButton" onclick="grantAccess()">
+        Grant Patch Access
+    </button>
+
+    <button id="patchButton" onclick="startPatch()" disabled>
+        Patch
+    </button>
+
+    <p id="status">Checking existing authorization...</p>
 </main>
+
 <script>
+"use strict";
+
+const accessButton = document.getElementById("accessButton");
 const patchButton = document.getElementById("patchButton");
 const statusElement = document.getElementById("status");
-function grantAccess() {
-    statusElement.textContent = "Checking Shizuku...";
-    Patcher.grantAccess();
-}
-function onAccessResult(granted, message) {
-    patchButton.disabled = !granted;
-    statusElement.textContent =
-        message || (granted
-            ? "Access granted. You can continue."
-            : "Access denied. Start Shizuku and grant permission.");
-}
-function startPatch() {
-    patchButton.disabled = true;
-    statusElement.textContent = "Copying OBB files...";
-    Patcher.startPatch();
-}
-function onPatchStatus(message) {
+
+let requestPending = false;
+
+function setStatus(message, type = "") {
     statusElement.textContent = message;
-    patchButton.disabled = false;
+    statusElement.className = type;
 }
+
+function grantAccess() {
+    if (requestPending) return;
+
+    if (!window.Patcher) {
+        setStatus(
+            "App connection unavailable. Restart BaboonPatcher.",
+            "error"
+        );
+        return;
+    }
+
+    requestPending = true;
+    accessButton.disabled = true;
+    patchButton.disabled = true;
+
+    setStatus("Checking existing Bytezuku/Shizuku authorization...");
+
+    // Prevent the page from remaining stuck indefinitely.
+    window.accessTimeout = setTimeout(() => {
+        requestPending = false;
+        accessButton.disabled = false;
+
+        setStatus(
+            "No authorization response received. Check that Bytezuku is running and rebuild the app with the matching MainActivity.kt.",
+            "error"
+        );
+    }, 10000);
+
+    try {
+        Patcher.grantAccess();
+    } catch (error) {
+        clearTimeout(window.accessTimeout);
+        requestPending = false;
+        accessButton.disabled = false;
+
+        setStatus(
+            "Authorization check failed: " + error.message,
+            "error"
+        );
+    }
+}
+
+/*
+ * Callback used by MainActivity.kt.
+ */
+window.onPatcherStatus = function(granted, message) {
+    clearTimeout(window.accessTimeout);
+
+    requestPending = false;
+    accessButton.disabled = false;
+    patchButton.disabled = !granted;
+
+    setStatus(
+        message || (granted
+            ? "Patch access granted."
+            : "Patch access unavailable."),
+        granted ? "success" : "error"
+    );
+};
+
+/*
+ * Compatibility with older MainActivity.kt versions.
+ */
+window.onAccessResult = function(granted, message) {
+    window.onPatcherStatus(granted, message);
+};
+
+function startPatch() {
+    if (requestPending) return;
+
+    if (!window.Patcher) {
+        setStatus("App connection unavailable.", "error");
+        return;
+    }
+
+    requestPending = true;
+    patchButton.disabled = true;
+
+    setStatus("Starting OBB copy operation...");
+
+    window.patchTimeout = setTimeout(() => {
+        requestPending = false;
+        patchButton.disabled = false;
+
+        setStatus(
+            "The patch operation did not return a response. Check MainActivity.kt and the patch service.",
+            "error"
+        );
+    }, 30000);
+
+    try {
+        Patcher.startPatch();
+    } catch (error) {
+        clearTimeout(window.patchTimeout);
+        requestPending = false;
+        patchButton.disabled = false;
+
+        setStatus(
+            "Patch failed: " + error.message,
+            "error"
+        );
+    }
+}
+
+/*
+ * Handles the status callback used by the patch operation.
+ */
+window.onPatchStatus = function(message) {
+    clearTimeout(window.patchTimeout);
+
+    requestPending = false;
+    patchButton.disabled = false;
+
+    setStatus(message || "Patch operation finished.");
+};
 </script>
 </body>
 </html>
