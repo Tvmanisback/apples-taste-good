@@ -23,8 +23,22 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildTypes {
+        debug {
+            isDebuggable = true
+        }
+
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
 }
 
 dependencies {
-    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:api:12.2.0")
 }
